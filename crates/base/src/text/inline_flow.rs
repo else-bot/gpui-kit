@@ -2158,6 +2158,124 @@ mod tests {
         }
     }
 
+    fn code_flow_lines(
+        text: &str,
+        code: Option<Range<usize>>,
+        wrap_width: Pixels,
+    ) -> (InlineFlowLayout, Vec<(String, Pixels)>) {
+        use super::super::inline::test_fonts::{BODY, MONO, WideMonoTextSystem};
+        use gpui::{Empty, TestApp};
+        let mut app = TestApp::with_text_system(Arc::new(WideMonoTextSystem));
+        let mut window = app.open_window(|_, _| Empty);
+        let style = TextStyle {
+            font_family: BODY.into(),
+            font_size: AbsoluteLength::Pixels(px(10.)),
+            ..Default::default()
+        };
+        let highlights = code
+            .into_iter()
+            .map(|range| {
+                (
+                    range,
+                    InlineHighlight {
+                        font_family: Some(MONO.into()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let items = vec![MeasureItem::Text {
+            text: SharedString::from(text.to_string()),
+            links: vec![],
+            highlights,
+        }];
+        let layout = window.update(|_, window, cx| {
+            layout_flow(&items, &[None], &style, Some(wrap_width), window, cx)
+        });
+        let lines = layout
+            .fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                PositionedFragment::Text { text, origin, .. } => Some((text.to_string(), origin.y)),
+                _ => None,
+            })
+            .collect();
+        (layout, lines)
+    }
+
+    fn line_of(lines: &[(String, Pixels)], needle: &str) -> Pixels {
+        lines
+            .iter()
+            .rev()
+            .find(|(text, _)| text.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} in {lines:?}"))
+            .1
+    }
+
+    #[test]
+    fn closing_punctuation_stays_on_the_line_of_the_inline_code_it_follows() {
+        use super::super::inline::test_fonts::{BODY, MONO, WideMonoTextSystem};
+        let font_size = px(10.);
+        let lead = WideMonoTextSystem::width_of("Use ", BODY, font_size);
+        for punctuation in [",", ".", ")", ":", "?", "”"] {
+            let text = format!("Use code_span{punctuation} then more");
+            let code = 4..4 + "code_span".len();
+            let wrap_width =
+                lead + WideMonoTextSystem::width_of("code_span", MONO, font_size) + px(1.);
+            let (_, lines) = code_flow_lines(&text, Some(code), wrap_width);
+            assert_eq!(
+                line_of(&lines, "code_span"),
+                line_of(&lines, punctuation),
+                "{text:?}: {lines:?}"
+            );
+
+            if punctuation == "?" {
+                // Plain text breaks before `?` on purpose, so URLs wrap.
+                continue;
+            }
+            let plain = format!("Use word{punctuation} then more");
+            let wrap_width = WideMonoTextSystem::width_of("Use word", BODY, font_size) + px(1.);
+            let (_, lines) = code_flow_lines(&plain, None, wrap_width);
+            assert_eq!(
+                line_of(&lines, "word"),
+                line_of(&lines, punctuation),
+                "{plain:?}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn closing_punctuation_joins_the_last_piece_of_a_split_inline_code_span() {
+        for (text, code) in [
+            ("x aaaaaaaaaaaaaaaaaaa, end", "aaaaaaaaaaaaaaaaaaa"),
+            (
+                "x 你好世界你好世界你好世界你好世界你好世。tail",
+                "你好世界你好世界你好世界你好世界你好世",
+            ),
+            (
+                "x one two three four five six. tail",
+                "one two three four five six",
+            ),
+        ] {
+            let start = text.find(code).unwrap();
+            let (layout, lines) = code_flow_lines(text, Some(start..start + code.len()), px(100.));
+            assert!(layout.size.width <= px(100.), "{text:?}: {:?}", layout.size);
+            let reconstructed: String = lines.iter().map(|(text, _)| text.as_str()).collect();
+            assert_eq!(reconstructed, text);
+            let last_code_char = code.chars().last().unwrap().to_string();
+            let punctuation = text[start + code.len()..]
+                .chars()
+                .next()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                line_of(&lines, &last_code_char),
+                line_of(&lines, &punctuation),
+                "{text:?}: {lines:?}"
+            );
+        }
+    }
+
     #[test]
     fn inline_code_line_is_as_tall_as_a_plain_line_when_glyphs_overflow_it() {
         use super::super::inline::test_fonts::{BODY, MONO, WideMonoTextSystem};
