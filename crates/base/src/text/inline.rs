@@ -16,11 +16,11 @@ use std::{
 };
 
 use gpui::{
-    App, BorderStyle, Bounds, ClickEvent, CursorStyle, Edges, Element, ElementId, Global,
-    GlobalElementId, Half, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, SharedString, StyleRefinement, StyledText, Task, TextAlign,
-    TextLayout, TextRun, TextStyle, Window, point, px, quad, size,
+    AnyTooltip, App, BorderStyle, Bounds, ClickEvent, CursorStyle, Edges, Element, ElementId,
+    Global, GlobalElementId, Half, HighlightStyle, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseClickEvent, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyleRefinement, StyledText, Task,
+    TextAlign, TextLayout, TextRun, TextStyle, Window, point, px, quad, size,
 };
 
 use crate::{
@@ -326,6 +326,7 @@ pub(super) struct Inline {
     /// The start of a pending reveal, when it is in this text.
     reveal: Option<RevealAt>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    link_tooltip: bool,
     /// What this frame's layout was shaped with, to hand the shaped text to
     /// the next frame (see [`RetainedLayout`]).
     retained_key: Option<(Vec<TextRun>, TextStyle)>,
@@ -704,6 +705,7 @@ impl Inline {
             range_backgrounds: Vec::new(),
             reveal: None,
             link_click_handler,
+            link_tooltip: false,
             retained_key: None,
             handed_over: false,
             editor_piece: None,
@@ -820,6 +822,58 @@ impl Inline {
         }
 
         None
+    }
+
+    fn prepaint_link_tooltip(&mut self, hitbox: &Hitbox, window: &mut Window, cx: &mut App) {
+        let Some(view) = GlobalState::global(cx).text_view_state() else {
+            return;
+        };
+        let Some(builder) = view.read(cx).link_tooltip.clone() else {
+            return;
+        };
+        self.link_tooltip = !self.links.is_empty();
+        // Hit testing is unavailable during prepaint, as with native GPUI tooltips.
+        let position = window.mouse_position();
+        if !self.link_tooltip
+            || window.last_input_was_keyboard()
+            || !hitbox.bounds.contains(&position)
+            || !hitbox.content_mask.bounds.contains(&position)
+        {
+            return;
+        }
+        let Some(link) = Self::link_for_position(self.styled_text.layout(), &self.links, position)
+        else {
+            return;
+        };
+        let cached = view
+            .read(cx)
+            .hovered_link_tooltip
+            .as_ref()
+            .filter(|(url, _)| *url == link.url)
+            .map(|(_, tooltip)| tooltip.clone());
+        let tooltip = match cached {
+            Some(tooltip) => tooltip,
+            None => {
+                let tooltip = builder(&link.url, window, cx);
+                view.update(cx, |state, _| {
+                    state.hovered_link_tooltip = Some((link.url.clone(), tooltip.clone()));
+                });
+                tooltip
+            }
+        };
+        let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
+        let layout = self.styled_text.layout().clone();
+        let links = self.links.clone();
+        window.set_tooltip(AnyTooltip {
+            view: tooltip,
+            mouse_position: position + point(px(8.), px(12.)),
+            check_visible_and_update: Rc::new(move |_, window, _| {
+                let position = window.mouse_position();
+                !window.last_input_was_keyboard()
+                    && bounds.contains(&position)
+                    && Self::link_for_position(&layout, &links, position).is_some()
+            }),
+        });
     }
 
     /// Get the range of the link at given mouse position.
@@ -1186,6 +1240,7 @@ impl Element for Inline {
         self.request_reveal(window);
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        self.prepaint_link_tooltip(&hitbox, window, cx);
         self.retain_styled_text(cx);
         hitbox
     }
@@ -1397,15 +1452,22 @@ impl Element for Inline {
                 let hitbox = hitbox.clone();
                 let text_layout = text_layout.clone();
                 let links = self.links.clone();
+                let link_tooltip = self.link_tooltip;
                 let mut hovered_link = hovered_link;
                 move |event: &MouseMoveEvent, phase, window, cx| {
-                    if !phase.bubble() || !hitbox.is_hovered(window) {
+                    if !phase.bubble() {
+                        return;
+                    }
+                    if !hitbox.is_hovered(window) {
+                        if link_tooltip && hovered_link.take().is_some() {
+                            cx.notify(current_view);
+                        }
                         return;
                     }
 
                     let updated =
                         Self::link_range_for_position(&text_layout, &links, event.position);
-                    if hovered_link != updated {
+                    if hovered_link != updated || (link_tooltip && updated.is_some()) {
                         hovered_link = updated;
                         cx.notify(current_view);
                     }

@@ -1610,6 +1610,9 @@ fn spans_width(spans: &[ShapedSpan], range: Range<usize>) -> Pixels {
 /// another family is shaped with the same run the renderer uses and enters
 /// the wrapper as measured elements. Oversized spans retain word boundaries;
 /// oversized words can break at grapheme boundaries without splitting Unicode.
+/// Closing punctuation right after such a span joins its last element: the
+/// wrapper does not see the span's last character, so it would otherwise
+/// offer a break before the punctuation that plain text never offers.
 fn push_text_wrap_fragments<'a>(
     fragments: &mut Vec<WrapLineFragment<'a>>,
     text: &'a str,
@@ -1620,9 +1623,10 @@ fn push_text_wrap_fragments<'a>(
     window: &mut Window,
 ) {
     let font_size = text_style.font_size.to_pixels(window.rem_size());
+    let measured = |highlight: &InlineHighlight| highlight.font_family.is_some();
     let mut cursor = range.start;
-    for (highlight_range, highlight) in highlights {
-        if highlight.font_family.is_none() {
+    for (ix, (highlight_range, highlight)) in highlights.iter().enumerate() {
+        if !measured(highlight) {
             continue;
         }
         let start = highlight_range.start.max(cursor);
@@ -1649,29 +1653,101 @@ fn push_text_wrap_fragments<'a>(
         };
         let insets = highlight.code_insets(measured_font_size, rem_size);
         let padding = insets.left + insets.right;
-        let width = measure(span) + padding;
-        if width <= wrap_width {
-            fragments.push(WrapLineFragment::element(width, span.len()));
+
+        let next_measured = highlights[ix + 1..]
+            .iter()
+            .filter(|(r, h)| measured(h) && r.start >= end)
+            .map(|(r, _)| r.start)
+            .min()
+            .unwrap_or(range.end)
+            .min(range.end);
+        let suffix_len = text[end..next_measured]
+            .char_indices()
+            .find(|(_, c)| !is_closing_punctuation(*c))
+            .map_or(next_measured - end, |(i, _)| i);
+        let suffix_width = if suffix_len == 0 {
+            Pixels::ZERO
         } else {
-            for word in span.split_word_bounds() {
+            let suffix = &text[end..end + suffix_len];
+            let suffix_highlights =
+                slice_ranges(highlights, end, end + suffix_len, |r, h| (r, h.clone()));
+            let runs = text_runs(suffix.len(), text_style, &suffix_highlights);
+            window
+                .text_system()
+                .layout_line(suffix, font_size, &runs, None)
+                .width
+        };
+
+        let mut pieces = Vec::new();
+        let width = measure(span) + padding;
+        if width + suffix_width <= wrap_width {
+            pieces.push((width, span.len()));
+        } else {
+            let words = span.split_word_bounds().collect::<Vec<_>>();
+            let last_word = words.len() - 1;
+            for (word_ix, word) in words.into_iter().enumerate() {
+                let tail = if word_ix == last_word {
+                    suffix_width
+                } else {
+                    Pixels::ZERO
+                };
                 let width = measure(word) + padding;
-                if width <= wrap_width {
-                    fragments.push(WrapLineFragment::element(width, word.len()));
+                if width + tail <= wrap_width {
+                    pieces.push((width, word.len()));
                 } else {
                     for grapheme in word.graphemes(true) {
-                        fragments.push(WrapLineFragment::element(
-                            measure(grapheme) + padding,
-                            grapheme.len(),
-                        ));
+                        pieces.push((measure(grapheme) + padding, grapheme.len()));
                     }
                 }
             }
         }
-        cursor = end;
+        if let Some(last) = pieces.last_mut() {
+            last.0 += suffix_width;
+            last.1 += suffix_len;
+        }
+        fragments.extend(
+            pieces
+                .into_iter()
+                .map(|(width, len)| WrapLineFragment::element(width, len)),
+        );
+        cursor = end + suffix_len;
     }
     if cursor < range.end {
         fragments.push(WrapLineFragment::text(&text[cursor..range.end]));
     }
+}
+
+fn is_closing_punctuation(c: char) -> bool {
+    matches!(
+        c,
+        ',' | '.'
+            | ':'
+            | ';'
+            | '!'
+            | '?'
+            | ')'
+            | ']'
+            | '}'
+            | '\''
+            | '"'
+            | '’'
+            | '”'
+            | '»'
+            | '…'
+            | '%'
+            | '，'
+            | '。'
+            | '、'
+            | '：'
+            | '；'
+            | '！'
+            | '？'
+            | '）'
+            | '」'
+            | '』'
+            | '】'
+            | '》'
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2157,6 +2233,124 @@ mod tests {
                 })
                 .collect();
             assert_eq!(reconstructed, text);
+        }
+    }
+
+    fn code_flow_lines(
+        text: &str,
+        code: Option<Range<usize>>,
+        wrap_width: Pixels,
+    ) -> (InlineFlowLayout, Vec<(String, Pixels)>) {
+        use super::super::inline::test_fonts::{BODY, MONO, WideMonoTextSystem};
+        use gpui::{Empty, TestApp};
+        let mut app = TestApp::with_text_system(Arc::new(WideMonoTextSystem));
+        let mut window = app.open_window(|_, _| Empty);
+        let style = TextStyle {
+            font_family: BODY.into(),
+            font_size: AbsoluteLength::Pixels(px(10.)),
+            ..Default::default()
+        };
+        let highlights = code
+            .into_iter()
+            .map(|range| {
+                (
+                    range,
+                    InlineHighlight {
+                        font_family: Some(MONO.into()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let items = vec![MeasureItem::Text {
+            text: SharedString::from(text.to_string()),
+            links: vec![],
+            highlights,
+        }];
+        let layout = window.update(|_, window, cx| {
+            layout_flow(&items, &[None], &style, Some(wrap_width), window, cx)
+        });
+        let lines = layout
+            .fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                PositionedFragment::Text { text, origin, .. } => Some((text.to_string(), origin.y)),
+                _ => None,
+            })
+            .collect();
+        (layout, lines)
+    }
+
+    fn line_of(lines: &[(String, Pixels)], needle: &str) -> Pixels {
+        lines
+            .iter()
+            .rev()
+            .find(|(text, _)| text.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} in {lines:?}"))
+            .1
+    }
+
+    #[test]
+    fn closing_punctuation_stays_on_the_line_of_the_inline_code_it_follows() {
+        use super::super::inline::test_fonts::{BODY, MONO, WideMonoTextSystem};
+        let font_size = px(10.);
+        let lead = WideMonoTextSystem::width_of("Use ", BODY, font_size);
+        for punctuation in [",", ".", ")", ":", "?", "”"] {
+            let text = format!("Use code_span{punctuation} then more");
+            let code = 4..4 + "code_span".len();
+            let wrap_width =
+                lead + WideMonoTextSystem::width_of("code_span", MONO, font_size) + px(1.);
+            let (_, lines) = code_flow_lines(&text, Some(code), wrap_width);
+            assert_eq!(
+                line_of(&lines, "code_span"),
+                line_of(&lines, punctuation),
+                "{text:?}: {lines:?}"
+            );
+
+            if punctuation == "?" {
+                // Plain text breaks before `?` on purpose, so URLs wrap.
+                continue;
+            }
+            let plain = format!("Use word{punctuation} then more");
+            let wrap_width = WideMonoTextSystem::width_of("Use word", BODY, font_size) + px(1.);
+            let (_, lines) = code_flow_lines(&plain, None, wrap_width);
+            assert_eq!(
+                line_of(&lines, "word"),
+                line_of(&lines, punctuation),
+                "{plain:?}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn closing_punctuation_joins_the_last_piece_of_a_split_inline_code_span() {
+        for (text, code) in [
+            ("x aaaaaaaaaaaaaaaaaaa, end", "aaaaaaaaaaaaaaaaaaa"),
+            (
+                "x 你好世界你好世界你好世界你好世界你好世。tail",
+                "你好世界你好世界你好世界你好世界你好世",
+            ),
+            (
+                "x one two three four five six. tail",
+                "one two three four five six",
+            ),
+        ] {
+            let start = text.find(code).unwrap();
+            let (layout, lines) = code_flow_lines(text, Some(start..start + code.len()), px(100.));
+            assert!(layout.size.width <= px(100.), "{text:?}: {:?}", layout.size);
+            let reconstructed: String = lines.iter().map(|(text, _)| text.as_str()).collect();
+            assert_eq!(reconstructed, text);
+            let last_code_char = code.chars().last().unwrap().to_string();
+            let punctuation = text[start + code.len()..]
+                .chars()
+                .next()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                line_of(&lines, &last_code_char),
+                line_of(&lines, &punctuation),
+                "{text:?}: {lines:?}"
+            );
         }
     }
 
