@@ -7,9 +7,10 @@ Only `gpui-base` changes:
 
 - `TextView::link_tooltip` accepts an application-supplied tooltip builder.
   The preview follows the pointer and clears when the pointer leaves the link.
+  Links whose displayed text already equals the URL omit the preview.
   The application owns its appearance.
-- Regression tests cover native link preview movement and dismissal, plus
-  punctuation after inline code and split Unicode spans.
+- Regression tests cover native link preview movement, dismissal, and redundant
+  preview suppression, plus punctuation after inline code and split Unicode spans.
 
 GPUI Kit 0.9.0 uses gpui-pre 0.3.11, whose line wrapper keeps inline elements
 attached to adjacent words. The fork no longer patches punctuation wrapping.
