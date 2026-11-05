@@ -821,11 +821,11 @@ impl Inline {
         layout: &TextLayout,
         links: &Vec<(Range<usize>, LinkMark)>,
         position: Point<Pixels>,
-    ) -> Option<LinkMark> {
+    ) -> Option<(Range<usize>, LinkMark)> {
         let offset = layout.index_for_position(position).ok()?;
         for (range, link) in links.iter() {
             if range.contains(&offset) {
-                return Some(link.clone());
+                return Some((range.clone(), link.clone()));
             }
         }
 
@@ -849,10 +849,14 @@ impl Inline {
         {
             return;
         }
-        let Some(link) = Self::link_for_position(self.styled_text.layout(), &self.links, position)
+        let Some((range, link)) =
+            Self::link_for_position(self.styled_text.layout(), &self.links, position)
         else {
             return;
         };
+        if &self.text[range] == link.url.as_ref() {
+            return;
+        }
         let cached = view
             .read(cx)
             .hovered_link_tooltip
@@ -872,6 +876,7 @@ impl Inline {
         let bounds = hitbox.bounds.intersect(&hitbox.content_mask.bounds);
         let layout = self.styled_text.layout().clone();
         let links = self.links.clone();
+        let text = self.text.clone();
         window.set_tooltip(AnyTooltip {
             view: tooltip,
             mouse_position: position + point(px(8.), px(12.)),
@@ -879,7 +884,8 @@ impl Inline {
                 let position = window.mouse_position();
                 !window.last_input_was_keyboard()
                     && bounds.contains(&position)
-                    && Self::link_for_position(&layout, &links, position).is_some()
+                    && Self::link_for_position(&layout, &links, position)
+                        .is_some_and(|(range, link)| &text[range] != link.url.as_ref())
             }),
         });
     }
@@ -1505,7 +1511,7 @@ impl Element for Inline {
                         return;
                     }
 
-                    if let Some(link) =
+                    if let Some((_, link)) =
                         Self::link_for_position(&text_layout, &links, event.position)
                     {
                         TextSelection::end(window, cx);

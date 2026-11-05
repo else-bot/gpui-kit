@@ -459,6 +459,7 @@ impl TextView {
     ///
     /// The builder receives the link's URL. The view caches the tooltip
     /// until a different destination is shown.
+    /// Links whose displayed text equals their URL do not show a tooltip.
     pub fn link_tooltip<F>(mut self, builder: F) -> Self
     where
         F: Fn(&SharedString, &mut Window, &mut App) -> AnyView + Send + Sync + 'static,
@@ -3372,6 +3373,85 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("link-destination-preview").is_none());
+    }
+
+    #[gpui::test]
+    fn link_tooltip_only_shows_destinations_missing_from_the_label(cx: &mut TestAppContext) {
+        struct Preview;
+        impl Render for Preview {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .debug_selector(|| "link-destination-preview".into())
+                    .child("https://example.com/path")
+            }
+        }
+        struct Root {
+            view: Entity<TextViewState>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                TextView::new(&self.view).link_tooltip(|_, _, cx| cx.new(|_| Preview).into())
+            }
+        }
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            view: cx.new(|cx| {
+                TextViewState::markdown(
+                    "[https://example.com/path](https://example.com/path)\n\n\
+                     https://example.com/path\n\n\
+                     [Example](https://example.com/path)\n\n\
+                     [https://other.example/path](https://example.com/path)\n\n\
+                     [https://example.com/**path**](https://example.com/path)\n\n\
+                     [Example](https://example.com/path) https://example.com/path",
+                    cx,
+                )
+            }),
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = root.read_with(cx, |root, cx| {
+            root.view.read(cx).selection_adapter.text_bounds()
+        });
+        assert_eq!(bounds.len(), 6);
+        for (index, shows_tooltip) in [
+            (2, true),
+            (0, false),
+            (1, false),
+            (3, true),
+            (4, false),
+            (0, false),
+        ] {
+            let bounds = bounds[index];
+            let position = point(bounds.left() + px(2.), bounds.center().y);
+            cx.update(|window, cx| window.simulate_mouse_move(position, cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(
+                cx.debug_bounds("link-destination-preview").is_some(),
+                shows_tooltip,
+                "link {index}"
+            );
+        }
+        let bounds = bounds[5];
+        for (x, shows_tooltip) in [
+            (bounds.left() + px(2.), true),
+            (bounds.right() - px(2.), false),
+            (bounds.left() + px(2.), true),
+        ] {
+            cx.update(|window, cx| window.simulate_mouse_move(point(x, bounds.center().y), cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert_eq!(
+                cx.debug_bounds("link-destination-preview").is_some(),
+                shows_tooltip,
+                "moving between links in one paragraph"
+            );
+        }
+        cx.simulate_click(
+            point(bounds.right() - px(2.), bounds.center().y),
+            Modifiers::default(),
+        );
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/path"));
     }
 
     #[gpui::test]
