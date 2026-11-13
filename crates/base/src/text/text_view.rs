@@ -3376,6 +3376,85 @@ mod tests {
     }
 
     #[gpui::test]
+    fn link_tooltip_stays_hidden_under_an_overlay(cx: &mut TestAppContext) {
+        struct Preview;
+        impl Render for Preview {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .debug_selector(|| "link-destination-preview".into())
+                    .child("/tmp/report.json")
+            }
+        }
+        struct Root {
+            view: Entity<TextViewState>,
+            overlay: bool,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .child(
+                        TextView::new(&self.view)
+                            .link_tooltip(|_, _, cx| cx.new(|_| Preview).into()),
+                    )
+                    .when(self.overlay, |root| {
+                        root.child(gpui::deferred(
+                            div().absolute().top_0().left_0().size_full().occlude(),
+                        ))
+                    })
+            }
+        }
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            view: cx.new(|cx| {
+                TextViewState::markdown("[preview destination](file:///tmp/report.json)", cx)
+            }),
+            overlay: false,
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = root.read_with(cx, |root, cx| {
+            root.view.read(cx).selection_adapter.text_bounds()[0]
+        });
+        let start = point(bounds.left() + px(2.), bounds.center().y);
+        cx.update(|window, cx| window.simulate_mouse_move(start, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("link-destination-preview").is_some(),
+            "an uncovered link shows its destination"
+        );
+
+        root.update(cx, |root, cx| {
+            root.overlay = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let requested = cx.update(|window, cx| window.simulate_next_frame(cx));
+        assert!(
+            requested > 0,
+            "covering the hovered link redraws to hide its destination"
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            cx.debug_bounds("link-destination-preview").is_none(),
+            "an overlay opened over the hovered link hides its destination"
+        );
+
+        for x in [px(4.), px(20.)] {
+            cx.update(|window, cx| window.simulate_mouse_move(start + point(x, px(0.)), cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(
+                cx.debug_bounds("link-destination-preview").is_none(),
+                "a link under an overlay shows no destination"
+            );
+        }
+    }
+
+    #[gpui::test]
     fn link_tooltip_only_shows_destinations_missing_from_the_label(cx: &mut TestAppContext) {
         struct Preview;
         impl Render for Preview {
