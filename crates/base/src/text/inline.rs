@@ -352,6 +352,10 @@ pub(crate) struct InlineState {
     pub(crate) editor_key: Option<u64>,
     /// UI owners of retained layouts; cleanup metadata is not document state.
     pub(super) cleanup_senders: Vec<Sender<()>>,
+    /// Whether the last hit test found the pointer over this text. Prepaint
+    /// cannot hit test, and the pointer can be inside the text's bounds while
+    /// an overlay covers it.
+    pub(super) pointer_over: bool,
 }
 
 impl PartialEq for InlineState {
@@ -842,7 +846,9 @@ impl Inline {
         self.link_tooltip = !self.links.is_empty();
         // Hit testing is unavailable during prepaint, as with native GPUI tooltips.
         let position = window.mouse_position();
+        let state = self.state.clone();
         if !self.link_tooltip
+            || !Self::is_pointer_over(&state)
             || window.last_input_was_keyboard()
             || !hitbox.bounds.contains(&position)
             || !hitbox.content_mask.bounds.contains(&position)
@@ -883,11 +889,22 @@ impl Inline {
             check_visible_and_update: Rc::new(move |_, window, _| {
                 let position = window.mouse_position();
                 !window.last_input_was_keyboard()
+                    && Self::is_pointer_over(&state)
                     && bounds.contains(&position)
                     && Self::link_for_position(&layout, &links, position)
                         .is_some_and(|(range, link)| &text[range] != link.url.as_ref())
             }),
         });
+    }
+
+    fn is_pointer_over(state: &Mutex<InlineState>) -> bool {
+        state.lock().is_ok_and(|state| state.pointer_over)
+    }
+
+    fn set_pointer_over(state: &Mutex<InlineState>, pointer_over: bool) -> bool {
+        state.lock().is_ok_and(|mut state| {
+            std::mem::replace(&mut state.pointer_over, pointer_over) != pointer_over
+        })
     }
 
     /// Get the range of the link at given mouse position.
@@ -1316,8 +1333,15 @@ impl Element for Inline {
         // is: under GPUI's retained views, reading it makes the text depend on
         // every pointer move, so a transcript of markdown would be drawn again
         // whenever the pointer moved anywhere.
-        let hovered_link = hitbox
-            .is_hovered(window)
+        let pointer_over = hitbox.is_hovered(window);
+        if pointer_over != state.pointer_over {
+            state.pointer_over = pointer_over;
+            if self.link_tooltip {
+                // This frame's tooltip was placed before the hit test.
+                window.request_animation_frame();
+            }
+        }
+        let hovered_link = pointer_over
             .then(|| {
                 Self::link_range_for_position(&text_layout, &self.links, window.mouse_position())
             })
@@ -1469,12 +1493,17 @@ impl Element for Inline {
                 let text_layout = text_layout.clone();
                 let links = self.links.clone();
                 let link_tooltip = self.link_tooltip;
+                let state = self.state.clone();
                 let mut hovered_link = hovered_link;
                 move |event: &MouseMoveEvent, phase, window, cx| {
                     if !phase.bubble() {
                         return;
                     }
-                    if !hitbox.is_hovered(window) {
+                    let pointer_over = hitbox.is_hovered(window);
+                    if Self::set_pointer_over(&state, pointer_over) && link_tooltip {
+                        cx.notify(current_view);
+                    }
+                    if !pointer_over {
                         if link_tooltip && hovered_link.take().is_some() {
                             cx.notify(current_view);
                         }
