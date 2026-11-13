@@ -352,10 +352,11 @@ pub(crate) struct InlineState {
     pub(crate) editor_key: Option<u64>,
     /// UI owners of retained layouts; cleanup metadata is not document state.
     pub(super) cleanup_senders: Vec<Sender<()>>,
-    /// Whether the last hit test found the pointer over this text. Prepaint
-    /// cannot hit test, and the pointer can be inside the text's bounds while
-    /// an overlay covers it.
-    pub(super) pointer_over: bool,
+    /// The bounds of the rendering the last hit test found under the pointer.
+    /// Prepaint cannot hit test, and the pointer can be inside the text's
+    /// bounds while an overlay covers it. Bounds tell apart two renderings of
+    /// one document, which share this state.
+    pub(super) hovered_bounds: Option<Bounds<Pixels>>,
 }
 
 impl PartialEq for InlineState {
@@ -847,8 +848,9 @@ impl Inline {
         // Hit testing is unavailable during prepaint, as with native GPUI tooltips.
         let position = window.mouse_position();
         let state = self.state.clone();
+        let hitbox_bounds = hitbox.bounds;
         if !self.link_tooltip
-            || !Self::is_pointer_over(&state)
+            || !Self::is_hovered(&state, hitbox_bounds)
             || window.last_input_was_keyboard()
             || !hitbox.bounds.contains(&position)
             || !hitbox.content_mask.bounds.contains(&position)
@@ -889,7 +891,7 @@ impl Inline {
             check_visible_and_update: Rc::new(move |_, window, _| {
                 let position = window.mouse_position();
                 !window.last_input_was_keyboard()
-                    && Self::is_pointer_over(&state)
+                    && Self::is_hovered(&state, hitbox_bounds)
                     && bounds.contains(&position)
                     && Self::link_for_position(&layout, &links, position)
                         .is_some_and(|(range, link)| &text[range] != link.url.as_ref())
@@ -897,14 +899,23 @@ impl Inline {
         });
     }
 
-    fn is_pointer_over(state: &Mutex<InlineState>) -> bool {
-        state.lock().is_ok_and(|state| state.pointer_over)
+    fn is_hovered(state: &Mutex<InlineState>, bounds: Bounds<Pixels>) -> bool {
+        state
+            .lock()
+            .is_ok_and(|state| state.hovered_bounds == Some(bounds))
     }
 
-    fn set_pointer_over(state: &Mutex<InlineState>, pointer_over: bool) -> bool {
-        state.lock().is_ok_and(|mut state| {
-            std::mem::replace(&mut state.pointer_over, pointer_over) != pointer_over
-        })
+    /// Records whether the rendering at `bounds` is hovered and returns
+    /// whether that changed what the state holds.
+    fn record_hover(state: &mut InlineState, bounds: Bounds<Pixels>, hovered: bool) -> bool {
+        let next = if hovered {
+            Some(bounds)
+        } else if state.hovered_bounds == Some(bounds) {
+            None
+        } else {
+            return false;
+        };
+        std::mem::replace(&mut state.hovered_bounds, next) != next
     }
 
     /// Get the range of the link at given mouse position.
@@ -1334,12 +1345,9 @@ impl Element for Inline {
         // every pointer move, so a transcript of markdown would be drawn again
         // whenever the pointer moved anywhere.
         let pointer_over = hitbox.is_hovered(window);
-        if pointer_over != state.pointer_over {
-            state.pointer_over = pointer_over;
-            if self.link_tooltip {
-                // This frame's tooltip was placed before the hit test.
-                window.request_animation_frame();
-            }
+        if Self::record_hover(&mut state, hitbox.bounds, pointer_over) && self.link_tooltip {
+            // This frame's tooltip was placed before the hit test.
+            window.request_animation_frame();
         }
         let hovered_link = pointer_over
             .then(|| {
@@ -1500,8 +1508,8 @@ impl Element for Inline {
                         return;
                     }
                     let pointer_over = hitbox.is_hovered(window);
-                    if Self::set_pointer_over(&state, pointer_over) && link_tooltip {
-                        cx.notify(current_view);
+                    if let Ok(mut state) = state.lock() {
+                        Self::record_hover(&mut state, hitbox.bounds, pointer_over);
                     }
                     if !pointer_over {
                         if link_tooltip && hovered_link.take().is_some() {
