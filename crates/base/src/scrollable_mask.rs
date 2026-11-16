@@ -12,7 +12,9 @@ use gpui::{
 };
 use gpui::{Corners, Pixels};
 
-use crate::{AxisExt, OngoingScrollExt as _, ScrollbarHandle, StyledExt as _};
+use crate::{
+    AxisExt, OngoingScrollExt as _, Scrollbar, ScrollbarHandle, ScrollbarMode, StyledExt as _,
+};
 
 thread_local! {
     static LAST_HORIZONTAL_SCROLL_CLAIM: Cell<Option<HorizontalScrollClaim>> =
@@ -72,6 +74,10 @@ fn caller_id() -> ElementId {
 /// scrolling when there is no vertical overflow. This wrapper keeps the visual
 /// clipping and scroll offset, while delegating wheel input to [`ScrollableMask`]
 /// so vertical wheel events can continue bubbling to the parent scroller.
+///
+/// Content wider than the viewport gets a horizontal scrollbar, always shown:
+/// a clipped column looks like the end of the content, and nothing else
+/// tells the reader it scrolls. Content that fits gets none.
 pub(crate) fn horizontal_scroll_area(
     id: impl Into<ElementId>,
     scroll_handle: &ScrollHandle,
@@ -111,6 +117,21 @@ pub(crate) fn horizontal_scroll_area(
                 .child(child),
         )
         .child(ScrollableMask::new(Axis::Horizontal, scroll_handle).id(id))
+        .child(
+            div().absolute().inset_0().child(
+                Scrollbar::horizontal(scroll_handle)
+                    .mode(ScrollbarMode::Always)
+                    // The bar overlays the content's last line: draw only
+                    // the thumb, which sits in the bottom padding.
+                    .styles(|styles| {
+                        styles.track(|track| {
+                            track
+                                .bg(gpui::transparent_black())
+                                .border_color(gpui::transparent_black())
+                        })
+                    }),
+            ),
+        )
         .child(frame)
 }
 
@@ -647,8 +668,8 @@ impl<H: ScrollbarHandle + Clone> Element for ScrollableMask<H> {
 mod tests {
     use super::*;
     use gpui::{
-        Context, IntoElement, ListAlignment, ListState, Modifiers, Render, ScrollDelta, ScrollEvent,
-        TestAppContext, VisualTestContext, Window, div, list, point, px,
+        Context, IntoElement, ListAlignment, ListState, Modifiers, Render, ScrollDelta,
+        ScrollEvent, TestAppContext, VisualTestContext, Window, div, list, point, px,
     };
 
     #[test]
