@@ -121,14 +121,20 @@ pub(crate) fn horizontal_scroll_area(
             div().absolute().inset_0().child(
                 Scrollbar::horizontal(scroll_handle)
                     .mode(ScrollbarMode::Always)
-                    // The bar overlays the content's last line: draw only
-                    // the thumb, which sits in the bottom padding.
+                    // The bar overlays the content's last line, so its
+                    // hitbox and thumb stay within a table cell's 7 px
+                    // bottom padding and its track is not painted.
                     .styles(|styles| {
-                        styles.track(|track| {
-                            track
-                                .bg(gpui::transparent_black())
-                                .border_color(gpui::transparent_black())
-                        })
+                        styles
+                            .track(|track| {
+                                track
+                                    .width(px(7.))
+                                    .bg(gpui::transparent_black())
+                                    .border_color(gpui::transparent_black())
+                            })
+                            .thumb(|thumb| thumb.width(px(4.)).inset(px(2.)))
+                            .thumb_hover(|thumb| thumb.width(px(5.)).inset(px(1.)))
+                            .thumb_active(|thumb| thumb.width(px(5.)).inset(px(1.)))
                     }),
             ),
         )
@@ -769,6 +775,24 @@ mod tests {
         cx.simulate_click(point(px(80.), px(35.)), Modifiers::default());
 
         assert!(scroll_handle.offset().x < px(0.));
+    }
+
+    #[gpui::test]
+    fn horizontal_scroll_area_track_leaves_content_above_it_clickable(cx: &mut TestAppContext) {
+        let scroll_handle = ScrollHandle::new();
+        let (_, cx) = cx.add_window_view({
+            let scroll_handle = scroll_handle.clone();
+            move |_, _| HorizontalScrollAreaTest { scroll_handle }
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_click(point(px(80.), px(32.)), Modifiers::default());
+
+        assert_eq!(scroll_handle.offset().x, px(0.));
     }
 
     #[gpui::test]
