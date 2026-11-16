@@ -647,7 +647,7 @@ impl<H: ScrollbarHandle + Clone> Element for ScrollableMask<H> {
 mod tests {
     use super::*;
     use gpui::{
-        Context, IntoElement, ListAlignment, ListState, Render, ScrollDelta, ScrollEvent,
+        Context, IntoElement, ListAlignment, ListState, Modifiers, Render, ScrollDelta, ScrollEvent,
         TestAppContext, VisualTestContext, Window, div, list, point, px,
     };
 
@@ -730,6 +730,57 @@ mod tests {
         });
 
         assert_eq!(scroll_handle.offset().x, px(0.));
+    }
+
+    #[gpui::test]
+    fn horizontal_scroll_area_track_click_scrolls(cx: &mut TestAppContext) {
+        let scroll_handle = ScrollHandle::new();
+        let (_, cx) = cx.add_window_view({
+            let scroll_handle = scroll_handle.clone();
+            move |_, _| HorizontalScrollAreaTest { scroll_handle }
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_click(point(px(80.), px(35.)), Modifiers::default());
+
+        assert!(scroll_handle.offset().x < px(0.));
+    }
+
+    #[gpui::test]
+    fn horizontal_scroll_area_that_fits_has_no_track(cx: &mut TestAppContext) {
+        let scroll_handle = ScrollHandle::new();
+        let (_, cx) = cx.add_window_view({
+            let scroll_handle = scroll_handle.clone();
+            move |_, _| FittingScrollAreaTest { scroll_handle }
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        cx.simulate_click(point(px(80.), px(35.)), Modifiers::default());
+
+        assert_eq!(scroll_handle.offset().x, px(0.));
+    }
+
+    struct FittingScrollAreaTest {
+        scroll_handle: ScrollHandle,
+    }
+
+    impl Render for FittingScrollAreaTest {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(100.)).h(px(40.)).child(horizontal_scroll_area(
+                "horizontal-scroll-area",
+                &self.scroll_handle,
+                &Default::default(),
+                div().w_full().h(px(40.)),
+            ))
+        }
     }
 
     /// Reproduces the markdown table case: the scroll area lives inside a
